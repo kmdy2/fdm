@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>火影2.5D格斗</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+        background: #111;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        min-height: 100vh;
+        font-family: "Microsoft Yahei", sans-serif;
+    }
+    #game {
+        border: 3px solid #ff8c00;
+        border-radius: 8px;
+        background: linear-gradient(#87ceeb 0%, #b0e0e6 60%, #deb887 60%, #d2b48c 100%);
+        image-rendering: pixelated;
+    }
+    .tip {
+        position: fixed;
+        bottom: 20px;
+        color: #aaa;
+        font-size: 14px;
+        text-align: center;
+        width: 100%;
+    }
+</style>
+</head>
+<body>
+<canvas id="game" width="960" height="540"></canvas>
+<div class="tip">
+    P1：WASD移动 | J普攻 | K技能 | L大招 &nbsp;&nbsp;|&nbsp;&nbsp; P2：方向键移动 | 1普攻 | 2技能 | 3大招
+</div>
+
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const GROUND_Y = 380;
+const DEPTH = 80; // 2.5D纵深
+
+// 玩家类
+class Fighter {
+    constructor(x, y, name, color, controls) {
+        this.x = x;
+        this.y = y;
+        this.z = 0; // 纵深位置 0~1
+        this.name = name;
+        this.color = color;
+        this.controls = controls;
+        this.hp = 100;
+        this.chakra = 0;
+        this.maxHp = 100;
+        this.maxChakra = 100;
+        this.speed = 4;
+        this.facing = 1; // 1右 -1左
+        this.state = 'idle'; // idle, run, attack, skill, ult, hit
+        this.animFrame = 0;
+        this.animTimer = 0;
+        this.attackCd = 0;
+        this.skillCd = 0;
+        this.ultCd = 0;
+        this.hitTimer = 0;
+        this.bodyW = 50;
+        this.bodyH = 80;
+    }
+
+    update(keys, enemy) {
+        // 冷却
+        if (this.attackCd > 0) this.attackCd--;
+        if (this.skillCd > 0) this.skillCd--;
+        if (this.ultCd > 0) this.ultCd--;
+        if (this.hitTimer > 0) {
+            this.hitTimer--;
+            if (this.hitTimer === 0) this.state = 'idle';
+        }
+
+        // 朝向
+        this.facing = enemy.x > this.x ? 1 : -1;
+
+        // 移动（受击硬直时不能动）
+        if (this.state !== 'hit' && this.state !== 'ult') {
+            let moving = false;
+            
+            if (keys[this.controls.left]) {
+                this.x -= this.speed;
+                moving = true;
+            }
+            if (keys[this.controls.right]) {
+                this.x += this.speed;
+                moving = true;
+            }
+            // 2.5D纵深移动
+            if (keys[this.controls.up]) {
+                this.z -= 0.03;
+                if (this.z < 0) this.z = 0;
+                moving = true;
+            }
+            if (keys[this.controls.down]) {
+                this.z += 0.03;
+                if (this.z > 1) this.z = 1;
+                moving = true;
+            }
+
+            if (moving && this.state === 'idle') this.state = 'run';
+            if (!moving && this.state === 'run') this.state = 'idle';
+
+            // 攻击
+            if (keys[this.controls.attack] && this.attackCd === 0) {
+                this.state = 'attack';
+                this.attackCd = 20;
+                this.animFrame = 0;
+                this.chakra = Math.min(this.maxChakra, this.chakra + 8);
+                // 命中判定
+                if (this.checkHit(enemy, 70)) {
+                    enemy.takeDamage(8);
+                }
+            }
+
+            // 技能
+            if (keys[this.controls.skill] && this.skillCd === 0 && this.chakra >= 30) {
+                this.state = 'skill';
+                this.skillCd = 60;
+                this.animFrame = 0;
+                this.chakra -= 30;
+                if (this.checkHit(enemy, 120)) {
+                    enemy.takeDamage(18);
+                }
+            }
+
+            // 大招
+            if (keys[this.controls.ult] && this.ultCd === 0 && this.chakra >= 100) {
+                this.state = 'ult';
+                this.ultCd = 180;
+                this.animFrame = 0;
+                this.chakra = 0;
+                if (this.checkHit(enemy, 180)) {
+                    enemy.takeDamage(35);
+                }
+            }
+        }
+
+        // 动画帧
+        this.animTimer++;
+        if (this.animTimer > 6) {
+            this.animTimer = 0;
+            this.animFrame++;
+            if (this.state === 'attack' && this.animFrame > 4) this.state = 'idle';
+            if (this.state === 'skill' && this.animFrame > 6) this.state = 'idle';
+            if (this.state === 'ult' && this.animFrame > 12) this.state = 'idle';
+        }
+
+        // 边界
+        if (this.x < 30) this.x = 30;
+        if (this.x > 930) this.x = 930;
+    }
+
+    checkHit(enemy, range) {
+        const dx = enemy.x - this.x;
+        const dz = Math.abs(enemy.z - this.z) * DEPTH;
+        const dist = Math.sqrt(dx*dx + dz*dz);
+        return dist < range && this.facing === Math.sign(dx);
+    }
+
+    takeDamage(dmg) {
+        this.hp -= dmg;
+        this.state = 'hit';
+        this.hitTimer = 15;
+        this.animFrame = 0;
+        if (this.hp < 0) this.hp = 0;
+    }
+
+    draw() {
+        // 2.5D 透视缩放 + 位置偏移
+        const scale = 1 - this.z * 0.2;
+        const drawY = GROUND_Y + this.z * DEPTH;
+        const w = this.bodyW * scale;
+        const h = this.bodyH * scale;
+
+        ctx.save();
+        ctx.translate(this.x, drawY);
+        ctx.scale(this.facing * scale, scale);
+
+        // 影子
+        ctx.fillStyle = 'rgba(0,0,0,0.2)';
+        ctx.beginPath();
+        ctx.ellipse(0, 5, 25, 8, 0, 0, Math.PI*2);
+        ctx.fill();
+
+        // 身体
+        const flash = this.state === 'hit' && this.hitTimer % 4 < 2;
+        ctx.fillStyle = flash ? '#fff' : this.color;
+        
+        // 上衣
+        ctx.fillRect(-20, -60, 40, 45);
+        // 裤子
+        ctx.fillStyle = flash ? '#fff' : '#333';
+        ctx.fillRect(-18, -15, 15, 25);
+        ctx.fillRect(3, -15, 15, 25);
+        // 头
+        ctx.fillStyle = flash ? '#fff' : '#ffd9b3';
+        ctx.fillRect(-15, -80, 30, 25);
+        // 头发
+        ctx.fillStyle = flash ? '#fff' : '#ffcc00';
+        ctx.fillRect(-17, -85, 34, 12);
+        // 护额
+        ctx.fillStyle = '#222';
+        ctx.fillRect(-16, -78, 32, 5);
+
+        // 攻击特效
+        if (this.state === 'attack') {
+            ctx.fillStyle = 'rgba(255,255,255,0.6)';
+            ctx.fillRect(20, -50, 40, 8);
+        }
+        if (this.state === 'skill') {
+            ctx.fillStyle = 'rgba(0,150,255,0.5)';
+            ctx.beginPath();
+            ctx.arc(40, -40, 30 + this.animFrame * 5, 0, Math.PI*2);
+            ctx.fill();
+        }
+        if (this.state === 'ult') {
+            ctx.fillStyle = `rgba(255,140,0,${0.3 + this.animFrame * 0.05})`;
+            ctx.beginPath();
+            ctx.arc(0, -40, 50 + this.animFrame * 8, 0, Math.PI*2);
+            ctx.fill();
+        }
+
+        ctx.restore();
+
+        // 血条
+        const barX = this.x - 40;
+        const barY = GROUND_Y + this.z * DEPTH - 100;
+        ctx.fillStyle = '#333';
+        ctx.fillRect(barX, barY, 80, 8);
+        ctx.fillStyle = '#e74c3c';
+        ctx.fillRect(barX, barY, 80 * (this.hp / this.maxHp), 8);
+        // 查克拉条
+        ctx.fillStyle = '#333';
+        ctx.fillRect(barX, barY + 10, 80, 5);
+        ctx.fillStyle = '#3498db';
+        ctx.fillRect(barX, barY + 10, 80 * (this.chakra / this.maxChakra), 5);
+    }
+}
+
+// 初始化玩家
+const p1 = new Fighter(200, 0, '鸣人', '#ff6b35', {
+    left: 'KeyA', right: 'KeyD', up: 'KeyW', down: 'KeyS',
+    attack: 'KeyJ', skill: 'KeyK', ult: 'KeyL'
+});
+
+const p2 = new Fighter(760, 0, '佐助', '#6c5ce7', {
+    left: 'ArrowLeft', right: 'ArrowRight', up: 'ArrowUp', down: 'ArrowDown',
+    attack: 'Digit1', skill: 'Digit2', ult: 'Digit3'
+});
+
+const keys = {};
+document.addEventListener('keydown', e => { keys[e.code] = true; });
+document.addEventListener('keyup', e => { keys[e.code] = false; });
+
+// 背景绘制
+function drawBackground() {
+    // 天空已由CSS渐变
+    // 远处山
+    ctx.fillStyle = '#6b8e23';
+    ctx.beginPath();
+    ctx.moveTo(0, 320);
+    ctx.lineTo(150, 220);
+    ctx.lineTo(300, 290);
+    ctx.lineTo(500, 200);
+    ctx.lineTo(700, 280);
+    ctx.lineTo(960, 230);
+    ctx.lineTo(960, 320);
+    ctx.closePath();
+    ctx.fill();
+
+    // 地面木纹
+    ctx.strokeStyle = 'rgba(139,90,43,0.3)';
+    for (let i = 0; i < 8; i++) {
+        ctx.beginPath();
+        ctx.moveTo(0, 380 + i * 20);
+        ctx.lineTo(960, 380 + i * 20);
+        ctx.stroke();
+    }
+}
+
+// 游戏循环
+function loop() {
+    ctx.clearRect(0, 0, 960, 540);
+    drawBackground();
+
+    p1.update(keys, p2);
+    p2.update(keys, p1);
+
+    // 纵深排序：z大的先画（在后面）
+    if (p1.z > p2.z) {
+        p1.draw();
+        p2.draw();
+    } else {
+        p2.draw();
+        p1.draw();
+    }
+
+    // 胜负判定
+    if (p1.hp <= 0 || p2.hp <= 0) {
+        ctx.fillStyle = 'rgba(0,0,0,0.7)';
+        ctx.fillRect(0, 0, 960, 540);
+        ctx.fillStyle = '#fff';
+        ctx.font = 'bold 48px Microsoft Yahei';
+        ctx.textAlign = 'center';
+        const winner = p1.hp <= 0 ? 'P2 佐助 胜利！' : 'P1 鸣人 胜利！';
+        ctx.fillText(winner, 480, 260);
+        ctx.font = '20px Microsoft Yahei';
+        ctx.fillText('刷新页面重新开始', 480, 310);
+        return;
+    }
+
+    requestAnimationFrame(loop);
+}
+
+loop();
+</script>
+</body>
+</html>
